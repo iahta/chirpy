@@ -1,21 +1,38 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	"github.com/pressly/goose/v3/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	database       *database.Queries
 }
 
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Unable to call database: %v", err)
+	}
 	ok := []byte("OK")
 	apiCfg := apiConfig{}
+
+	dbQueries := database.New(db)
+	apiCfg.database = dbQueries
+
 	appHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 
 	mux := http.NewServeMux()
@@ -79,17 +96,17 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&val)
 	if err != nil {
 		log.Printf("Error decoding parameters: %s", err)
-		cfg.respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 	if len(val.Body) > 140 {
-		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
 	cleanedText := filterProfanity(val.Body)
 
 	resp := cleanedResponse{CleanedBody: cleanedText}
-	cfg.respondWithJSON(w, http.StatusOK, resp)
+	respondWithJSON(w, http.StatusOK, resp)
 }
 
 func filterProfanity(chirp string) string {
@@ -107,7 +124,7 @@ func filterProfanity(chirp string) string {
 	return joined
 }
 
-func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg string) {
+func respondWithError(w http.ResponseWriter, code int, msg string) {
 	type errorResponse struct {
 		Error string `json:"error"`
 	}
@@ -119,13 +136,13 @@ func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg stri
 	w.Write(dat)
 }
 
-func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 
 	dat, err := json.Marshal(payload)
 	if err != nil {
-		cfg.respondWithError(w, http.StatusInternalServerError, "Error marshalling JSON")
+		respondWithError(w, http.StatusInternalServerError, "Error marshalling JSON")
 		return
 	}
 	w.Write(dat)
