@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/iahta/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/pressly/goose/v3/database"
 )
 
 type apiConfig struct {
@@ -41,6 +41,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateHandler)
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -57,6 +58,35 @@ func main() {
 	}
 
 	server.ListenAndServe()
+}
+
+func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	user := User{}
+	err := decoder.Decode(&user)
+	if err != nil {
+		log.Printf("Error decoding json: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+	if !isValidEmail(user.Email) {
+		log.Printf("Invalid email: %s", user.Email)
+		respondWithError(w, http.StatusBadRequest, "Invalid Email format")
+		return
+	}
+
+	newUser, err := cfg.database.CreateUser(r.Context(), user.Email)
+	if err != nil {
+		log.Printf("failed to create user: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, newUser)
+}
+
+func isValidEmail(email string) bool {
+	return strings.Contains(email, "@")
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -77,9 +107,23 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "Counter Reset!")
+	platform := os.Getenv("PLATFORM")
+	if platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Access forbidden outside development environment")
+		return
+	}
+
+	err := cfg.database.DeleteUsers(r.Context())
+	if err != nil {
+		log.Printf("Failed to reset users: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{
+		"message":         "All users reset",
+		"fileserver_hits": "0",
+	})
 }
 
 func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
