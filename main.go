@@ -18,24 +18,30 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	database       *database.Queries
+	platform       string
 }
 
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("Unable to call database: %v", err)
 	}
-	ok := []byte("OK")
-	apiCfg := apiConfig{}
-
 	dbQueries := database.New(db)
-	apiCfg.database = dbQueries
-
-	appHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
+	ok := []byte("OK")
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		database:       dbQueries,
+		platform:       platform,
+	}
 
 	mux := http.NewServeMux()
+	appHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(appHandler))
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
@@ -61,28 +67,42 @@ func main() {
 }
 
 func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+	type response struct {
+		User
+	}
+
 	decoder := json.NewDecoder(r.Body)
-	user := User{}
-	err := decoder.Decode(&user)
+	params := parameters{}
+	err := decoder.Decode(&params)
 	if err != nil {
 		log.Printf("Error decoding json: %s", err)
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
-	if !isValidEmail(user.Email) {
-		log.Printf("Invalid email: %s", user.Email)
+	if !isValidEmail(params.Email) {
+		log.Printf("Invalid email: %s", params.Email)
 		respondWithError(w, http.StatusBadRequest, "Invalid Email format")
 		return
 	}
 
-	newUser, err := cfg.database.CreateUser(r.Context(), user.Email)
+	user, err := cfg.database.CreateUser(r.Context(), params.Email)
 	if err != nil {
 		log.Printf("failed to create user: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 
-	respondWithJSON(w, http.StatusCreated, newUser)
+	respondWithJSON(w, http.StatusCreated, response{
+		User: User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		},
+	})
 }
 
 func isValidEmail(email string) bool {
@@ -106,24 +126,16 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("Reset is only allowed in dev environment."))
+		return
+	}
+
 	cfg.fileserverHits.Store(0)
-	platform := os.Getenv("PLATFORM")
-	if platform != "dev" {
-		respondWithError(w, http.StatusForbidden, "Access forbidden outside development environment")
-		return
-	}
-
-	err := cfg.database.DeleteUsers(r.Context())
-	if err != nil {
-		log.Printf("Failed to reset users: %v", err)
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
-		return
-	}
-
-	respondWithJSON(w, http.StatusOK, map[string]string{
-		"message":         "All users reset",
-		"fileserver_hits": "0",
-	})
+	cfg.database.DeleteUsers(r.Context())
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Hits reset to 0 and database reset to initial state."))
 }
 
 func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
