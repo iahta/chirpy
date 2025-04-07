@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -68,12 +69,9 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	type validate struct {
 		Body string `json:"body"`
 	}
-	type errorResponse struct {
-		Error string `json:"error"`
-	}
 
-	type validResponse struct {
-		Valid bool `json:"valid"`
+	type cleanedResponse struct {
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -81,29 +79,55 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&val)
 	if err != nil {
 		log.Printf("Error decoding parameters: %s", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-
-		errResp := errorResponse{Error: "Something went wrong"}
-		dat, _ := json.Marshal(errResp)
-		w.Write(dat)
+		cfg.respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 	if len(val.Body) > 140 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-
-		errResp := errorResponse{Error: "Chirp is too long"}
-		dat, _ := json.Marshal(errResp)
-		w.Write(dat)
+		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
+	cleanedText := filterProfanity(val.Body)
 
+	resp := cleanedResponse{CleanedBody: cleanedText}
+	cfg.respondWithJSON(w, http.StatusOK, resp)
+}
+
+func filterProfanity(chirp string) string {
+	bad_words := []string{"kerfuffle", "sharbert", "fornax"}
+	split := strings.Split(chirp, " ")
+	for i, word := range split {
+		lower_cased := strings.ToLower(word)
+		for _, bad_word := range bad_words {
+			if lower_cased == bad_word {
+				split[i] = "****"
+			}
+		}
+	}
+	joined := strings.Join(split, " ")
+	return joined
+}
+
+func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg string) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(code)
 
-	resp := validResponse{Valid: true}
-	dat, _ := json.Marshal(resp)
+	errResp := errorResponse{Error: msg}
+	dat, _ := json.Marshal(errResp)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+
+	dat, err := json.Marshal(payload)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Error marshalling JSON")
+		return
+	}
 	w.Write(dat)
 }
 
