@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/google/uuid"
 	"github.com/iahta/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -46,7 +47,7 @@ func main() {
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.validateHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
@@ -140,11 +141,8 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	type validate struct {
-		Body string `json:"body"`
-	}
-
-	type cleanedResponse struct {
-		CleanedBody string `json:"cleaned_body"`
+		Body   string    `json:"body"`
+		UserId uuid.UUID `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -152,17 +150,39 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&val)
 	if err != nil {
 		log.Printf("Error decoding parameters: %s", err)
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		respondWithError(w, http.StatusBadRequest, "Invalid Json")
+		return
+	}
+	if val.UserId == uuid.Nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid or missing User Id ")
 		return
 	}
 	if len(val.Body) > 140 {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
+	if len(val.Body) == 0 {
+		respondWithError(w, http.StatusBadRequest, "Chirp body is empty")
+		return
+	}
 	cleanedText := filterProfanity(val.Body)
 
-	resp := cleanedResponse{CleanedBody: cleanedText}
-	respondWithJSON(w, http.StatusOK, resp)
+	createdChirp, err := cfg.database.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleanedText,
+		UserID: val.UserId,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
+		return
+	}
+	response := Chirp{
+		ID:        createdChirp.ID,
+		CreatedAt: createdChirp.CreatedAt,
+		UpdatedAt: createdChirp.UpdatedAt,
+		Body:      createdChirp.Body,
+		UserId:    createdChirp.UserID,
+	}
+	respondWithJSON(w, http.StatusCreated, response)
 }
 
 func filterProfanity(chirp string) string {
