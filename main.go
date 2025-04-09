@@ -52,6 +52,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/chirps", apiCfg.validateHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
+	mux.HandleFunc("POST /api/login", apiCfg.loginHandler)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -68,6 +69,48 @@ func main() {
 	}
 
 	server.ListenAndServe()
+}
+
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	type response struct {
+		User
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding json: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+	if !isValidEmail(params.Email) {
+		log.Printf("Invalid email: %s", params.Email)
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	user, err := cfg.database.GetUser(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	err = auth.CheckPasswordHash(user.HashedPassword, params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	respondWithJSON(w, http.StatusOK, response{
+		User: User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		},
+	})
+
 }
 
 func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
