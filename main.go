@@ -46,6 +46,8 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(appHandler))
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
+	mux.HandleFunc("GET /api/chirps", apiCfg.retrieveHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.grabChirpHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	mux.HandleFunc("POST /api/chirps", apiCfg.validateHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
@@ -139,6 +141,53 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits reset to 0 and database reset to initial state."))
 }
 
+func (cfg *apiConfig) retrieveHandler(w http.ResponseWriter, r *http.Request) {
+	chirpsArray, err := cfg.database.RetrieveChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+		return
+	}
+	//convert database struct to api struct (lower case field names)
+	chirpsToReturn := make([]Chirp, len(chirpsArray))
+	for i, c := range chirpsArray {
+		chirpsToReturn[i] = Chirp{
+			ID:        c.ID,
+			CreatedAt: c.CreatedAt,
+			UpdatedAt: c.UpdatedAt,
+			Body:      c.Body,
+			UserID:    c.UserID,
+		}
+	}
+
+	respondWithJSON(w, http.StatusOK, chirpsToReturn)
+}
+
+func (cfg *apiConfig) grabChirpHandler(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	if chirpID == "" {
+		respondWithError(w, http.StatusNotFound, "Chirp ID is missing in the request path")
+		return
+	}
+	parsedChirp, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Invalid chirpID format. Ensure it is a valid UUID")
+		return
+	}
+	chirp, err := cfg.database.GrabChirp(r.Context(), parsedChirp)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Chirp not found")
+		return
+	}
+	response := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+	respondWithJSON(w, http.StatusOK, response)
+}
+
 func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 	type validate struct {
 		Body   string    `json:"body"`
@@ -180,7 +229,7 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: createdChirp.CreatedAt,
 		UpdatedAt: createdChirp.UpdatedAt,
 		Body:      createdChirp.Body,
-		UserId:    createdChirp.UserID,
+		UserID:    createdChirp.UserID,
 	}
 	respondWithJSON(w, http.StatusCreated, response)
 }
@@ -231,4 +280,39 @@ func middlewareLog(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+*/
+
+/*
+// Convert a database Chirp to an API Chirp
+func dbChirpToAPIChirp(dbChirp database.Chirp) Chirp {
+    return Chirp{
+        ID:        dbChirp.ID,
+        CreatedAt: dbChirp.CreatedAt,
+        UpdatedAt: dbChirp.UpdatedAt,
+        Body:      dbChirp.Body,
+        UserID:    dbChirp.UserID,
+    }
+}
+
+// Convert a slice of database Chirps to API Chirps
+func dbChirpsToAPIChirps(dbChirps []database.Chirp) []Chirp {
+    apiChirps := make([]Chirp, len(dbChirps))
+    for i, dbChirp := range dbChirps {
+        apiChirps[i] = dbChirpToAPIChirp(dbChirp)
+    }
+    return apiChirps
+}
+Datbase chirp conversion becomes much cleaner
+func (cfg *apiConfig) retrieveHandler(w http.ResponseWriter, r *http.Request) {
+    dbChirps, err := cfg.database.RetrieveChirps(r.Context())
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+        return
+    }
+
+    // Much cleaner with a helper function!
+    apiChirps := dbChirpsToAPIChirps(dbChirps)
+    respondWithJSON(w, http.StatusOK, apiChirps)
+}
+
 */
