@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/iahta/chirpy/internal/auth"
@@ -21,14 +22,19 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	database       *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	JWT_Secret := os.Getenv("JWT_SECRET")
 	if platform == "" {
 		log.Fatal("PLATFORM must be set")
+	}
+	if JWT_Secret == "" {
+		log.Fatal("JWT_SECRET must be set")
 	}
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -40,6 +46,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		database:       dbQueries,
 		platform:       platform,
+		jwtSecret:      JWT_Secret,
 	}
 
 	mux := http.NewServeMux()
@@ -50,7 +57,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.retrieveHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.grabChirpHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-	mux.HandleFunc("POST /api/chirps", apiCfg.validateHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 	mux.HandleFunc("POST /api/login", apiCfg.loginHandler)
 
@@ -73,11 +80,16 @@ func main() {
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
+		Password         string `json:"password"`
+		Email            string `json:"email"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
 	}
 	type response struct {
-		User
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -102,13 +114,21 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
 	}
+	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 {
+		params.ExpiresInSeconds = 3600
+	}
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, time.Duration(params.ExpiresInSeconds)*time.Second)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create authentication token")
+		return
+	}
+
 	respondWithJSON(w, http.StatusOK, response{
-		User: User{
-			ID:        user.ID,
-			CreatedAt: user.CreatedAt,
-			UpdatedAt: user.UpdatedAt,
-			Email:     user.Email,
-		},
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+		Token:     token,
 	})
 
 }
@@ -242,10 +262,9 @@ func (cfg *apiConfig) grabChirpHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusOK, response)
 }
 
-func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
 	type validate struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -256,10 +275,6 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Invalid Json")
 		return
 	}
-	if val.UserId == uuid.Nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid or missing User Id ")
-		return
-	}
 	if len(val.Body) > 140 {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
@@ -268,11 +283,21 @@ func (cfg *apiConfig) validateHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusBadRequest, "Chirp body is empty")
 		return
 	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		return
+	}
 	cleanedText := filterProfanity(val.Body)
 
 	createdChirp, err := cfg.database.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   cleanedText,
-		UserID: val.UserId,
+		UserID: userID,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
