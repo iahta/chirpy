@@ -60,6 +60,8 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 	mux.HandleFunc("POST /api/login", apiCfg.loginHandler)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshHandler)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeHandler)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -78,19 +80,91 @@ func main() {
 	server.ListenAndServe()
 }
 
+func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
+	authHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		return
+	}
+	refresh_token, err := cfg.database.GetRefreshToken(r.Context(), authHeader)
+	if err != nil || refresh_token.Token == "" {
+		respondWithError(w, http.StatusUnauthorized, "Invalid or expired refresh token")
+		return
+	}
+	err = cfg.database.UpdateRefreshToken(r.Context(), database.UpdateRefreshTokenParams{
+		UpdatedAt: time.Now(),
+		RevokedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+		Token: refresh_token.Token,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to revoke refresh token")
+		return
+	}
+	respondWithJSON(w, http.StatusNoContent, nil)
+
+}
+
+func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	authHeader, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		return
+	}
+
+	refresh_token, err := cfg.database.GetRefreshToken(r.Context(), authHeader)
+	if err != nil || refresh_token.Token == "" {
+		respondWithError(w, http.StatusUnauthorized, "Invalid or expired refresh token")
+		return
+	}
+	if time.Now().After(refresh_token.ExpiresAt) || refresh_token.RevokedAt.Valid {
+		respondWithError(w, http.StatusUnauthorized, "Refresh token is invalid")
+		return
+	}
+	user, err := cfg.database.GetUserById(r.Context(), refresh_token.UserID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to retrieve User")
+		return
+	}
+
+	exp := time.Duration(3600 * time.Second)
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, exp)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create new token")
+		return
+	}
+
+	type response struct {
+		Token string `json:"token"`
+	}
+	respondWithJSON(w, http.StatusOK, response{
+		Token: token,
+	})
+
+}
+
+/* create refresh struct in own file, to grab refresh token do is revoked too//auto sqlc generated function to get refresh token, not with a pointer to struct
+func (t RefreshToken) IsExpired() bool {
+	return time.Now().After(t.ExpiresAt)
+}
+*/
+
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password         string `json:"password"`
-		Email            string `json:"email"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	type response struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-		Token     string    `json:"token"`
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -104,7 +178,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
 	}
-	user, err := cfg.database.GetUser(r.Context(), params.Email)
+	user, err := cfg.database.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
@@ -114,21 +188,31 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
 	}
-	if params.ExpiresInSeconds == 0 || params.ExpiresInSeconds > 3600 {
-		params.ExpiresInSeconds = 3600
-	}
-	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, time.Duration(params.ExpiresInSeconds)*time.Second)
+	exp := time.Duration(3600) * time.Second
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, exp)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create authentication token")
 		return
 	}
 
+	refresh_token, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Coludn't create refresh token")
+		return
+	}
+	cfg.database.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refresh_token,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	})
+
 	respondWithJSON(w, http.StatusOK, response{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-		Token:     token,
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        token,
+		RefreshToken: refresh_token,
 	})
 
 }
