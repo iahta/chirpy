@@ -38,7 +38,7 @@ func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) 
 
 	userID, err := auth.ValidateJWT(authHeader, cfg.jwtSecret)
 	if err != nil {
-		respondWithJSON(w, http.StatusUnauthorized, "Invalid Credentials")
+		respondWithError(w, http.StatusUnauthorized, "Invalid Credentials")
 		return
 	}
 
