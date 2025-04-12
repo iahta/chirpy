@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -312,11 +313,29 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) retrieveHandler(w http.ResponseWriter, r *http.Request) {
-	chirpsArray, err := cfg.database.RetrieveChirps(r.Context())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
-		return
+	var chirpsArray []database.Chirp
+	var err error
+	s := r.URL.Query().Get("author_id")
+	sorted := r.URL.Query().Get("sort")
+	if s == "" {
+		chirpsArray, err = cfg.database.RetrieveChirps(r.Context())
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+			return
+		}
+	} else {
+		parsedChirp, err := uuid.Parse(s)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "Invalid chirpID format. Ensure it is a valid UUID")
+			return
+		}
+		chirpsArray, err = cfg.database.RetrieveChirpsByAuthor(r.Context(), parsedChirp)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps")
+			return
+		}
 	}
+
 	//convert database struct to api struct (lower case field names)
 	chirpsToReturn := make([]Chirp, len(chirpsArray))
 	for i, c := range chirpsArray {
@@ -327,6 +346,10 @@ func (cfg *apiConfig) retrieveHandler(w http.ResponseWriter, r *http.Request) {
 			Body:      c.Body,
 			UserID:    c.UserID,
 		}
+	}
+
+	if strings.ToLower(sorted) == "desc" {
+		sort.Slice(chirpsToReturn, func(i, j int) bool { return chirpsToReturn[i].CreatedAt.After(chirpsToReturn[j].CreatedAt) })
 	}
 
 	respondWithJSON(w, http.StatusOK, chirpsToReturn)
