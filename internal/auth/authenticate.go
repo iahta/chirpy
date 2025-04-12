@@ -71,3 +71,25 @@ func MakeRefreshToken() (string, error) {
 	encodedStr := hex.EncodeToString(key)
 	return encodedStr, nil
 }
+
+func GetAPIKey(headers http.Header) (string, error) {
+	authToken := headers.Get("Authorization")
+	if authToken == "" {
+		return "", fmt.Errorf("error retrieving authorization")
+	}
+	parts := strings.Split(authToken, " ")
+	if len(parts) != 2 || parts[0] != "ApiKey" {
+		return "", fmt.Errorf("invalid authorization header found")
+	}
+	return parts[1], nil
+}
+
+func ValidatePolkaKey(apiKey, polkaKey string) error {
+	if apiKey == "" {
+		return fmt.Errorf("missing validation key")
+	}
+	if apiKey != polkaKey {
+		return fmt.Errorf("invalid api key")
+	}
+	return nil
+}

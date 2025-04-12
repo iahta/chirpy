@@ -12,10 +12,11 @@ import (
 )
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -24,10 +25,11 @@ func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) 
 		Email    string `json:"email"`
 	}
 	type response struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	authHeader, err := auth.GetBearerToken(r.Header)
@@ -68,12 +70,73 @@ func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) 
 		HashedPassword: newPassword,
 		ID:             userID,
 	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to update user profile")
+		return
+	}
 
 	respondWithJSON(w, http.StatusOK, response{
-		ID:        updatedUser.ID,
-		CreatedAt: updatedUser.CreatedAt,
-		UpdatedAt: updatedUser.UpdatedAt,
-		Email:     updatedUser.Email,
+		ID:          updatedUser.ID,
+		CreatedAt:   updatedUser.CreatedAt,
+		UpdatedAt:   updatedUser.UpdatedAt,
+		Email:       updatedUser.Email,
+		IsChirpyRed: updatedUser.IsChirpyRed.Bool,
 	})
+
+}
+
+func (cfg *apiConfig) upgradeUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	authKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized request")
+		return
+	}
+
+	err = auth.ValidatePolkaKey(authKey, cfg.polkaKey)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized request")
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding json: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+	if params.Event != "user.upgraded" {
+		respondWithJSON(w, http.StatusNoContent, nil)
+		return
+	}
+	///convert to uuid
+	parsedUser, err := uuid.Parse(params.Data.UserID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Invalid userID format. Ensure it is a valid UUID")
+		return
+	}
+
+	isAlreadyChirpyRed, err := cfg.database.IsUserChirpyRed(r.Context(), parsedUser)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "User can't be found")
+		return
+	}
+	if !isAlreadyChirpyRed.Bool {
+		err = cfg.database.UpgradeUserToRed(r.Context(), parsedUser)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "User can't be found")
+			return
+		}
+	}
+
+	respondWithJSON(w, http.StatusNoContent, nil)
 
 }

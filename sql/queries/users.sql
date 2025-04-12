@@ -26,5 +26,13 @@ WHERE id = $1;
 UPDATE users
 SET email = $1, hashed_password = $2, updated_at = $3
 WHERE id = $4
-RETURNING id, created_at, updated_at, email;
+RETURNING id, created_at, updated_at, email, is_chirpy_red;
  
+-- name: UpgradeUserToRed :exec
+UPDATE users
+SET is_chirpy_red = true
+WHERE id = $1;
+
+-- name: IsUserChirpyRed :one
+SELECT is_chirpy_red FROM users
+WHERE id = $1;
